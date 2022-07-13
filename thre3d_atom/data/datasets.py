@@ -54,14 +54,18 @@ class PosedImagesDataset(torch_data.Dataset):
         )
 
         # initialize the state of the object
+        self._images_dir = images_dir
+        self._camera_params_json = camera_params_json
+        self._image_data_range = image_data_range
+        self._normalize_scene_scale_bool = normalize_scene_scale
         self._downsample_factor = downsample_factor
+        self._rgba_white_bkgd = rgba_white_bkgd
+
         self._camera_bounds = self._setup_camera_bounds()
         self._camera_intrinsics = self._setup_camera_intrinsics()
         self._image_transform = get_torch_vision_image_transform(
             new_size=(self._camera_intrinsics.height, self._camera_intrinsics.width)
         )
-        self._image_data_range = image_data_range
-        self._rgba_white_bkgd = rgba_white_bkgd
 
         # apply normalization to the camera parameters if requested
         if normalize_scene_scale:
@@ -126,6 +130,16 @@ class PosedImagesDataset(torch_data.Dataset):
     @property
     def camera_parameters(self) -> Dict[str, Any]:
         return self._camera_parameters
+
+    def get_config_dict(self) -> Dict[str, Any]:
+        return {
+            "images_dir": self._images_dir,
+            "camera_params_json": self._camera_params_json,
+            "image_data_range": self._image_data_range,
+            "normalize_scene_scale": self._normalize_scene_scale_bool,
+            "downsample_factor": self._downsample_factor,
+            "rgba_white_bkgd": self._rgba_white_bkgd,
+        }
 
     @staticmethod
     def _filter_image_file_paths(

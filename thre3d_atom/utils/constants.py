@@ -17,5 +17,11 @@ EXTRA_SAMPLE_INTERVALS = "deltas"
 EXTRA_POINT_WEIGHTS = "point_weights"
 EXTRA_POINT_DEPTHS = "point_depths"
 
+# camera related keys
+CAMERA_BOUNDS = "camera_bounds"
+CAMERA_INTRINSICS = "camera_intrinsics"
+HEMISPHERICAL_RADIUS = "hemispherical_radius"
+
+
 # misc keys :D:
 EXTRA_INFO = "extra_info"

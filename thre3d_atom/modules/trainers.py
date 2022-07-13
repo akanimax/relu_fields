@@ -1,3 +1,5 @@
+import time
+from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
@@ -23,6 +25,11 @@ from thre3d_atom.thre3d_reprs.renderers import render_sh_voxel_grid
 from thre3d_atom.thre3d_reprs.voxels import (
     VoxelGrid,
     scale_voxel_grid_with_required_output_size,
+)
+from thre3d_atom.utils.constants import (
+    CAMERA_BOUNDS,
+    CAMERA_INTRINSICS,
+    HEMISPHERICAL_RADIUS,
 )
 from thre3d_atom.utils.imaging_utils import CameraPose, to8b
 
@@ -121,6 +128,13 @@ def train_sh_vox_grid_vol_mod_with_posed_images(
         scale_factor=scale_factor,
     )
 
+    # create downsampled versions of the train_dataset for lower training stages
+    stagewise_train_datasets = [train_dataset]
+    dataset_config_dict = train_dataset.get_config_dict()
+    for stage in range(1, num_stages):
+        dataset_config_dict.update({"downsample_factor": (scale_factor**stage)})
+        stagewise_train_datasets.insert(0, PosedImagesDataset(**dataset_config_dict))
+
     # downscale the feature-grid to the smallest size:
     with torch.no_grad():
         # TODO: Possibly create a nice interface for reprs as a resolution of the below warning
@@ -144,37 +158,11 @@ def train_sh_vox_grid_vol_mod_with_posed_images(
         )
         real_feedback_image = feedback_dataset[0][0].permute(1, 2, 0).cpu().numpy()
 
-    # setup the data_loader(s):
-    # There are a bunch of fancy CPU-GPU configuration being done here.
-    # Nothing too hard to understand, just refer the documentation page of PyTorch's
-    # dataloader -> https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader
-    # And, read the book titled "CUDA_BY_EXAMPLE" https://developer.nvidia.com/cuda-example
-    # Takes not long, just about 1-2 weeks :). But worth it :+1: :+1: :smile:!
-    train_dl = DataLoader(
-        train_dataset,
-        batch_size=image_batch_cache_size,
-        shuffle=True,
-        drop_last=True,
-        num_workers=0 if train_dataset.cached_data_mode else num_workers,
-        pin_memory=not train_dataset.cached_data_mode and num_workers > 0,
-        prefetch_factor=num_workers
-        if not train_dataset.cached_data_mode and num_workers > 0
-        else 2,
-        persistent_workers=not train_dataset.cached_data_mode and num_workers > 0,
+    train_dl = _make_dataloader_from_dataset(
+        train_dataset, image_batch_cache_size, num_workers
     )
     test_dl = (
-        DataLoader(
-            test_dataset,
-            batch_size=1,  # note that testing happens one image at a time
-            shuffle=False,
-            drop_last=False,
-            num_workers=0 if test_dataset.cached_data_mode else num_workers,
-            pin_memory=not test_dataset.cached_data_mode and num_workers > 0,
-            prefetch_factor=num_workers
-            if not test_dataset.cached_data_mode and num_workers > 0
-            else 2,
-            persistent_workers=not test_dataset.cached_data_mode and num_workers > 0,
-        )
+        _make_dataloader_from_dataset(test_dataset, 1, num_workers)
         if test_dataset is not None
         else None
     )
@@ -228,12 +216,20 @@ def train_sh_vox_grid_vol_mod_with_posed_images(
 
     # start actual training
     log.info("beginning training")
-    infinite_train_dl = iter(infinite_dataloader(train_dl))
+    time_spent_actually_training = 0
 
     # -----------------------------------------------------------------------------------------
     #  Main Training Loop                                                                     |
     # -----------------------------------------------------------------------------------------
     for stage in range(1, num_stages + 1):
+        # setup the dataset for the current training stage
+        # followed by creating an infinite training data-loader
+        current_stage_train_dataset = stagewise_train_datasets[stage - 1]
+        train_dl = _make_dataloader_from_dataset(
+            current_stage_train_dataset, image_batch_cache_size, num_workers
+        )
+        infinite_train_dl = iter(infinite_dataloader(train_dl))
+
         # setup volumetric_model's optimizer
         current_stage_lr = learning_rate * (stagewise_lr_decay_gamma ** (stage - 1))
         optimizeable_parameters = vol_mod.thre3d_repr.parameters()
@@ -251,15 +247,21 @@ def train_sh_vox_grid_vol_mod_with_posed_images(
         )
 
         # display logs related to this training stage:
+        train_image_height, train_image_width = (
+            current_stage_train_dataset.camera_intrinsics.height,
+            current_stage_train_dataset.camera_intrinsics.width,
+        )
         log.info(
             f"training stage: {stage}   "
-            f"voxel grid resolution: {vol_mod.thre3d_repr.grid_dims}"
+            f"voxel grid resolution: {vol_mod.thre3d_repr.grid_dims} "
+            f"training images resolution: [{train_image_height} x {train_image_width}]"
         )
         current_stage_lrs = [
             param_group["lr"] for param_group in optimizer.param_groups
         ]
         log_string = f"current stage learning rates: {current_stage_lrs} "
         log.info(log_string)
+        last_time = time.perf_counter()
         # -------------------------------------------------------------------------------------
         #  Single Stage Training Loop                                                         |
         # -------------------------------------------------------------------------------------
@@ -277,7 +279,7 @@ def train_sh_vox_grid_vol_mod_with_posed_images(
             for pose in poses:
                 casted_rays = flatten_rays(
                     cast_rays(
-                        camera_intrinsics,
+                        current_stage_train_dataset.camera_intrinsics,
                         CameraPose(rotation=pose[:, :3], translation=pose[:, 3:]),
                         device=vol_mod.device,
                     )
@@ -337,7 +339,7 @@ def train_sh_vox_grid_vol_mod_with_posed_images(
             # ---------------------------------------------------------------------------------
 
             # rest of the code per iteration is related to saving/logging/feedback/testing
-
+            time_spent_actually_training += time.perf_counter() - last_time
             global_step = ((stage - 1) * num_iterations_per_stage) + stage_iteration
 
             # tensorboard summaries feedback
@@ -393,8 +395,10 @@ def train_sh_vox_grid_vol_mod_with_posed_images(
                 or stage_iteration == 1
                 or stage_iteration == num_iterations_per_stage
             ):
-                # TODO: implement the training time calculation mechanism for the feedback
-                #  and console logging
+                log.info(
+                    f"TIME CHECK: time spent actually training "
+                    f"till now: {timedelta(seconds=time_spent_actually_training)}"
+                )
                 visualize_sh_vox_grid_vol_mod_rendered_feedback(
                     vol_mod=vol_mod,
                     render_feedback_pose=render_feedback_pose,
@@ -402,7 +406,7 @@ def train_sh_vox_grid_vol_mod_with_posed_images(
                     global_step=global_step,
                     feedback_logs_dir=render_dir,
                     parallel_rays_chunk_size=vol_mod.render_config.parallel_rays_chunk_size,
-                    training_time=None,
+                    training_time=time_spent_actually_training,
                     log_diffuse_rendered_version=True,
                     overridden_num_samples_per_ray=vol_mod.render_config.render_num_samples_per_ray,
                     verbose_rendering=verbose_rendering,
@@ -437,13 +441,17 @@ def train_sh_vox_grid_vol_mod_with_posed_images(
                 torch.save(
                     vol_mod.get_save_info(
                         extra_info={
-                            "camera_bounds": camera_bounds,
-                            "camera_intrinsics": camera_intrinsics,
-                            "hemispherical_radius": train_dataset.get_hemispherical_radius_estimate(),
+                            CAMERA_BOUNDS: camera_bounds,
+                            CAMERA_INTRINSICS: camera_intrinsics,
+                            HEMISPHERICAL_RADIUS: train_dataset.get_hemispherical_radius_estimate(),
                         }
                     ),
                     model_dir / f"model_stage_{stage}_iter_{global_step}.pth",
                 )
+
+            # ignore all the time spent doing verbose stuff :) and update
+            # the last_time clock event
+            last_time = time.perf_counter()
         # -------------------------------------------------------------------------------------
 
         # don't upsample the feature grid if the last stage is complete
@@ -473,4 +481,30 @@ def train_sh_vox_grid_vol_mod_with_posed_images(
 
     # training complete yay! :)
     log.info("Training complete")
+    log.info(
+        f"Total actual training time: {timedelta(seconds=time_spent_actually_training)}"
+    )
     return vol_mod
+
+
+def _make_dataloader_from_dataset(
+    dataset: PosedImagesDataset, batch_size: int, num_workers: int = 0
+) -> DataLoader:
+    # setup the data_loader:
+    # There are a bunch of fancy CPU-GPU configuration being done here.
+    # Nothing too hard to understand, just refer the documentation page of PyTorch's
+    # dataloader -> https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader
+    # And, read the book titled "CUDA_BY_EXAMPLE" https://developer.nvidia.com/cuda-example
+    # Takes not long, just about 1-2 weeks :). But worth it :+1: :+1: :smile:!
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=True,
+        num_workers=0 if dataset.cached_data_mode else dataset,
+        pin_memory=not dataset.cached_data_mode and num_workers > 0,
+        prefetch_factor=num_workers
+        if not dataset.cached_data_mode and num_workers > 0
+        else 2,
+        persistent_workers=not dataset.cached_data_mode and num_workers > 0,
+    )

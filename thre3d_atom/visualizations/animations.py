@@ -19,11 +19,18 @@ def render_camera_path_for_volumetric_model(
     camera_path: Sequence[CameraPose],
     camera_intrinsics: CameraIntrinsics,
     render_scale_factor: Optional[float] = None,
+    overridden_num_samples_per_ray: Optional[int] = None,
 ) -> np.array:
     if render_scale_factor is not None:
         # Render downsampled images for speed if requested
         camera_intrinsics = scale_camera_intrinsics(
             camera_intrinsics, render_scale_factor
+        )
+
+    overridden_config_dict = {}
+    if overridden_num_samples_per_ray is not None:
+        overridden_config_dict.update(
+            {"num_samples_per_ray": overridden_num_samples_per_ray}
         )
 
     rendered_frames = []
@@ -35,6 +42,7 @@ def render_camera_path_for_volumetric_model(
             camera_intrinsics,
             gpu_render=False,
             verbose=True,
+            **overridden_config_dict,
         )
         colour_frame = rendered_output.colour.numpy()
         depth_frame = rendered_output.depth.numpy()

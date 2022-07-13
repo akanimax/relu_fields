@@ -1,5 +1,6 @@
 from typing import Sequence, Tuple
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -62,6 +63,19 @@ def collate_rays(rays_list: Sequence[Rays]) -> Rays:
         origins=torch.cat([rays.origins for rays in rays_list], dim=0),
         directions=torch.cat([rays.directions for rays in rays_list], dim=0),
     )
+
+
+def compute_expected_density_scale_for_relu_field_grid(
+    grid_world_size: Tuple[float, float, float]
+) -> float:
+    """Einstien came in my dream and taught me this formula :sweat_smile: :D ..."""
+    diagonal_norm = np.sqrt(
+        np.sum([dim_extent**2 for dim_extent in grid_world_size])
+    ).item()
+    percent_density_scale, constant_grid_norm = 100.0, np.sqrt(3.0**3).item()
+    return (
+        (constant_grid_norm * percent_density_scale) / diagonal_norm
+    ) / NUM_COORD_DIMENSIONS
 
 
 def ndcize_rays(rays: Rays, camera_intrinsics: CameraIntrinsics) -> Rays:

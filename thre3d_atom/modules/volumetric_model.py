@@ -1,7 +1,7 @@
 import copy
 import dataclasses
 from pathlib import Path
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, Tuple
 
 import torch
 from torch.nn import Module
@@ -178,16 +178,20 @@ def create_volumetric_model_from_saved_model(
     model_path: Path,
     thre3d_repr_creator: Callable[[Dict[str, Any]], Module],
     device: torch.device = torch.device("cpu"),
-) -> VolumetricModel:
+) -> Tuple[VolumetricModel, Dict[str, Any]]:
     # load the saved model's data using
     model_data = torch.load(model_path)
     thre3d_repr = thre3d_repr_creator(model_data)
     render_config = model_data[RENDER_CONFIG_TYPE](**model_data[RENDER_CONFIG])
 
     # return a newly constructed VolumetricModel using the info above
-    return VolumetricModel(
-        thre3d_repr=thre3d_repr,
-        render_procedure=model_data[RENDER_PROCEDURE],
-        render_config=render_config,
-        device=device,
+    # and the additional information saved at the time of training :)
+    return (
+        VolumetricModel(
+            thre3d_repr=thre3d_repr,
+            render_procedure=model_data[RENDER_PROCEDURE],
+            render_config=render_config,
+            device=device,
+        ),
+        model_data[EXTRA_INFO],
     )

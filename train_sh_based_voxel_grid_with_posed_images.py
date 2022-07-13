@@ -8,6 +8,9 @@ from torch.backends import cudnn
 from thre3d_atom.data.datasets import PosedImagesDataset
 from thre3d_atom.modules.trainers import train_sh_vox_grid_vol_mod_with_posed_images
 from thre3d_atom.modules.volumetric_model import VolumetricModel
+from thre3d_atom.rendering.volumetric.utils.misc import (
+    compute_expected_density_scale_for_relu_field_grid,
+)
 from thre3d_atom.thre3d_reprs.renderers import (
     render_sh_voxel_grid,
     SHVoxGridRenderConfig,
@@ -82,13 +85,13 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
               help="number of samples taken per ray during training", show_default=True)
 @click.option("--num_stages", type=click.INT, required=False, default=4,
               help="number of progressive growing stages used in training", show_default=True)
-@click.option("--num_iterations_per_stage", type=click.INT, required=False, default=2000,
+@click.option("--num_iterations_per_stage", type=click.INT, required=False, default=500,
               help="number of training iterations performed per stage", show_default=True)
 @click.option("--scale_factor", type=click.FLOAT, required=False, default=2.0,
               help="factor by which the grid is up-scaled after each stage", show_default=True)
 @click.option("--learning_rate", type=click.FLOAT, required=False, default=0.03,
               help="learning rate used at the beginning (ADAM OPTIMIZER)", show_default=True)
-@click.option("--lr_decay_steps_per_stage", type=click.INT, required=False, default=1000,
+@click.option("--lr_decay_steps_per_stage", type=click.INT, required=False, default=400,
               help="number of iterations after which lr is exponentially decayed per stage", show_default=True)
 @click.option("--lr_decay_gamma_per_stage", type=click.FLOAT, required=False, default=0.1,
               help="value of gamma for exponential lr_decay (happens per stage)", show_default=True)
@@ -104,13 +107,13 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                    "note that this will be ignored if GPU-caching of the data is successful :)", show_default=True)
 
 # Various frequencies:
-@click.option("--save_frequency", type=click.INT, required=False, default=500,
+@click.option("--save_frequency", type=click.INT, required=False, default=250,
               help="number of iterations after which a model is saved", show_default=True)
-@click.option("--test_frequency", type=click.INT, required=False, default=500,
+@click.option("--test_frequency", type=click.INT, required=False, default=250,
               help="number of iterations after which test metrics are computed", show_default=True)
-@click.option("--feedback_frequency", type=click.INT, required=False, default=200,
+@click.option("--feedback_frequency", type=click.INT, required=False, default=100,
               help="number of iterations after which rendered feedback is generated", show_default=True)
-@click.option("--summary_frequency", type=click.INT, required=False, default=100,
+@click.option("--summary_frequency", type=click.INT, required=False, default=50,
               help="number of iterations after which training-loss/other-summaries are logged", show_default=True)
 
 # Miscellaneous modes
@@ -151,7 +154,10 @@ def main(**kwargs) -> None:
         vox_grid_density_activations_dict = {
             "density_preactivation": torch.nn.Identity(),
             "density_postactivation": torch.nn.ReLU(),
-            "expected_density_scale": 100.0,  # note this expected density value :)
+            # note this expected density value :)
+            "expected_density_scale": compute_expected_density_scale_for_relu_field_grid(
+                config.grid_world_size
+            ),
         }
     else:
         vox_grid_density_activations_dict = {
